@@ -1,6 +1,6 @@
 # Manejo de datos Hidrometeorologicos con R
 
-Taller Gratuito de Hidrologia
+Taller de Programación cientifica con R
 
 ## DOCENTES
 | Nombre                  | Github        |  Email         | Linkendin |
