@@ -4,7 +4,7 @@
 
 Taller de Programación cientifica con R
 
-## DOCENTES
+## DOCENTE
 | Nombre                  | Github        |  Email         | Linkendin |
 |:--------------------    |:--------------| :--------------| :---------|
 | Miguel Angel Garcia Tito | [@MGarciatito](https://github.com/Mgarciatito)| garciatitomiguel@gmail.com | [Miguel Angel Garcia](https://www.linkedin.com/in/garciatitomiguelangel/)|
