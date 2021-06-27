@@ -1,5 +1,5 @@
 # Manejo de datos Hidrometeorologicos con R
-<img src= "https://github.com/Mgarciatito/Manejo_datos_hidrometeorologicos_Nexus/blob/master/Textos/logo.png" width = "600">
+<img src= "https://github.com/Mgarciatito/Manejo_datos_hidrometeorologicos_Nexus/blob/master/Textos/logo.png" width = "900">
 
 
 Taller de Programación cientifica con R
