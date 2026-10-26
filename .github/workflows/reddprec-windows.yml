@@ -22,6 +22,8 @@ jobs:
           use-public-rspm: true
 
       - name: Instalar reddPrec desde GitHub y dependencia Kendall
+        env:
+          GITHUB_PAT: ${{ github.token }}
         shell: Rscript {0}
         run: |
           options(repos = c(CRAN = "https://cloud.r-project.org"))
