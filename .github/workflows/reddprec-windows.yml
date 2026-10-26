@@ -1,0 +1,172 @@
+name: reddPrec - prueba real en Windows
+on:
+  push:
+    branches:
+      - codex/reddprec-windows-test-20261025
+    paths:
+      - .github/workflows/reddprec-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gridPcp:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Instalar R 4.5.2
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.5.2'
+          use-public-rspm: true
+
+      - name: Instalar reddPrec desde GitHub y dependencia Kendall
+        shell: Rscript {0}
+        run: |
+          options(repos = c(CRAN = "https://cloud.r-project.org"))
+          options(timeout = 600)
+          options(install.packages.check.source = "no")
+          install.packages(c("remotes", "Kendall"), dependencies = NA)
+          stopifnot(requireNamespace("Kendall", quietly = TRUE))
+          remotes::install_github(
+            "rsnotivoli/reddPrec@74ac201f06a122101115a6be1bb8efd14795d42c",
+            dependencies = NA, upgrade = "never", force = TRUE)
+          stopifnot(requireNamespace("reddPrec", quietly = TRUE))
+
+      - name: Ejecutar gridPcp y comparar soluciones
+        shell: Rscript {0}
+        run: |
+          options(warn = 1)
+          library(reddPrec)
+          library(terra)
+          library(foreach)
+          library(doParallel)
+          stopifnot(.Platform$OS.type == "windows")
+          dir.create("resultados", showWarnings = FALSE)
+          setwd("resultados")
+          capture.output(sessionInfo(), file = "sessionInfo.txt")
+          capture.output(Sys.info(), file = "sistema.txt")
+          capture.output(packageDescription("reddPrec"), file = "reddPrec_instalado.txt")
+          cat("SISTEMA REAL:", paste(Sys.info(), collapse = " | "), "\n")
+          cat("VERSIONES: R", as.character(getRversion()), "reddPrec",
+              as.character(packageVersion("reddPrec")), "terra",
+              as.character(packageVersion("terra")), "Rcpp",
+              as.character(packageVersion("Rcpp")), "\n")
+          set.seed(42)
+          alt <- rast(nrows = 4, ncols = 5, xmin = -78.4, xmax = -77.4,
+                      ymin = -8.6, ymax = -7.6, crs = "EPSG:4326",
+                      vals = runif(20, 1000, 3000))
+          xy <- crds(alt)
+          lon <- lat <- alt
+          values(lon) <- xy[, 1]
+          values(lat) <- xy[, 2]
+          env <- c(alt, lon, lat)
+          names(env) <- c("alt", "lon", "lat")
+          stations <- data.frame(ID = sprintf("S%02d", 1:25),
+                                 lon = runif(25, -78.35, -77.45),
+                                 lat = runif(25, -8.55, -7.65))
+          stations$alt <- extract(alt, as.matrix(stations[, c("lon", "lat")]))[, 1]
+          stations <- stations[, c("ID", "alt", "lon", "lat")]
+          day21 <- setNames(round(runif(25, 1, 40), 1), stations$ID)
+          write.csv(stations, "estaciones_sinteticas.csv", row.names = FALSE)
+          write.csv(data.frame(ID = names(day21), Pp = day21), "pp_sintetica.csv", row.names = FALSE)
+          writeRaster(env, "covariables_sinteticas.tif", overwrite = TRUE)
+          arguments <- list(prec = day21, grid = env, dyncovars = NULL,
+                            sts = stations, model_fun = reddPrec::learner_glm,
+                            dates = as.Date("2025-03-21"), ncpu = 4,
+                            thres = NA, neibs = 15, coords = c("lon", "lat"),
+                            crs = "EPSG:4326", coords_as_preds = TRUE)
+          summary_rows <- list()
+          test_grid <- function(label, fun, args) {
+            start <- proc.time()[["elapsed"]]
+            warnings_seen <- character()
+            error_seen <- ""
+            status <- "PASS"
+            minimum <- maximum <- NA_real_
+            tryCatch(withCallingHandlers({
+              do.call(fun, c(args, list(dir_name = label)))
+              files <- paste0(c("pred_", "err_"), label, "/20250321.tif")
+              stopifnot(all(file.exists(files)))
+              out <- rast(files)
+              stopifnot(compareGeom(out[[1]], env[[1]], stopOnError = FALSE))
+              vals <- values(out)
+              stopifnot(ncell(out) == 20, all(is.finite(vals)), all(vals >= 0))
+              minimum <- min(vals[, 1])
+              maximum <- max(vals[, 1])
+            }, warning = function(w) {
+              warnings_seen <<- c(warnings_seen, conditionMessage(w))
+              invokeRestart("muffleWarning")
+            }), error = function(e) {
+              status <<- "ERROR"
+              error_seen <<- conditionMessage(e)
+            }, finally = {
+              try(doParallel::stopImplicitCluster(), silent = TRUE)
+              foreach::registerDoSEQ()
+            })
+            elapsed <- proc.time()[["elapsed"]] - start
+            row <- data.frame(Prueba = label, Estado = status, Segundos = elapsed,
+                              Min_pp = minimum, Max_pp = maximum, Error = error_seen,
+                              Avisos = paste(unique(warnings_seen), collapse = " | "))
+            summary_rows[[length(summary_rows) + 1L]] <<- row
+            write.csv(do.call(rbind, summary_rows), "resumen.csv", row.names = FALSE)
+            cat("\nPRUEBA:", label, "|", status, "|", round(elapsed, 2), "s\n")
+            if (nzchar(error_seen)) cat("ERROR:", error_seen, "\n")
+            if (length(warnings_seen)) cat("AVISOS:", paste(unique(warnings_seen), collapse = " | "), "\n")
+            invisible(status)
+          }
+          args_one <- arguments
+          args_one$ncpu <- 1
+          test_grid("original_ncpu1", reddPrec::gridPcp, args_one)
+          test_grid("original_ncpu4", reddPrec::gridPcp, arguments)
+          grid_segura <- reddPrec::gridPcp
+          local_env <- new.env(parent = environment(grid_segura))
+          local_env$registerDoParallel <- function(...) foreach::registerDoSEQ()
+          environment(grid_segura) <- local_env
+          sequential_status <- test_grid("secuencial", grid_segura, args_one)
+          foreach::registerDoSEQ()
+          daily <- function(prec, grid, dyncovars, sts, model_fun, dates, ncpu,
+                             thres, neibs, coords, crs, coords_as_preds, dir_name) {
+            getFromNamespace("predday", "reddPrec")(
+              x = prec, grid = grid, sts = sts[, setdiff(names(sts), "ID"), drop = FALSE],
+              model_fun = model_fun, neibs = neibs, coords = coords, crs = crs,
+              coords_as_preds = coords_as_preds, date = dates, thres = thres,
+              dir_name = dir_name)
+          }
+          daily_status <- test_grid("rutina_diaria", daily, args_one)
+          mixed_args <- args_one
+          mixed_args$prec[c(2, 7)] <- NA_real_
+          mixed_args$prec[c(3, 8, 12, 17, 22)] <- 0
+          mixed_status <- test_grid("secuencial_ceros_y_vacios", grid_segura, mixed_args)
+          comparison <- "No se pudo comparar."
+          if (sequential_status == "PASS" && daily_status == "PASS") {
+            a <- values(rast("pred_secuencial/20250321.tif"))
+            b <- values(rast("pred_rutina_diaria/20250321.tif"))
+            stopifnot(isTRUE(all.equal(a, b)))
+            comparison <- "La adaptacion secuencial y la rutina diaria producen resultados identicos."
+          }
+          writeLines(comparison, "comparacion.txt")
+          print(do.call(rbind, summary_rows), row.names = FALSE)
+          cat("\n", comparison, "\n", sep = "")
+          if (any(c(sequential_status, daily_status, mixed_status) != "PASS")) {
+            stop("Una de las pruebas secuenciales fallo; revisar resumen.csv.")
+          }
+          cat("\nVALIDACION_SECUENCIAL_COMPLETADA\n")
+
+      - name: Publicar resumen en el registro de la ejecucion
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path resultados/resumen.csv) {
+            "### Resultados de gridPcp en Windows" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Get-Content resultados/resumen.csv | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+      - name: Conservar registros, datos sinteticos y rasteres
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddprec-windows-resultados
+          path: resultados/
+          if-no-files-found: warn
+          retention-days: 7
